@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import requests
 import time
+import os
 from datetime import datetime
 import pytz
 
@@ -9,41 +10,157 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
+def load_dotenv(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+load_dotenv()
+
 # =========================
 # API KEYS
 # =========================
-ALPACA_API_KEY    = "PKEA24CVWXPWTQKYZJWQO7TY7N"
-ALPACA_SECRET_KEY = "5sb6HPNAbxyNQZESDckfs56ByW7fUXp3fAorga8jiRaL"
+ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
 
-LINE_CHANNEL_TOKEN = "FXjn2paEtU7hCyOAqeZEM/xImy8DZyADUfxiBNN0Gin+AtzmitBbXCq15ebhw2sY55SeId4TYEir6dSSolFGEpLFenklgDQbFvHZZaiP7CNayZaIOLmz8CJzWXw5tVTOZOBg2XjYHeQ8I1X0kWnJwAdB04t89/1O/w1cDnyilFU="
-LINE_USER_ID       = "U055a806a92f65f59a244daec80c171c6"
+LINE_CHANNEL_TOKEN = os.getenv("LINE_CHANNEL_TOKEN", "")
+LINE_USER_ID       = os.getenv("LINE_USER_ID", "")
 
-ALPACA_PAPER_TRADING = True
-client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER_TRADING)
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+ALPACA_PAPER_TRADING = env_bool("ALPACA_PAPER_TRADING", True)
+client: TradingClient | None = None
+
+def get_trading_client() -> TradingClient:
+    global client
+    if client is None:
+        if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+            raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set when ENABLE_ORDER_EXECUTION is true")
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER_TRADING)
+    return client
 
 # =========================
 # SETTINGS
 # =========================
-ENABLE_ORDER_EXECUTION = True
-RUN_CONTINUOUSLY = True
-SCAN_INTERVAL_SECONDS = 900
-MAX_TEST_ORDER_NOTIONAL = 100.0
+ENABLE_ORDER_EXECUTION = env_bool("ENABLE_ORDER_EXECUTION", False)
+RUN_CONTINUOUSLY = env_bool("RUN_CONTINUOUSLY", True)
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "900"))
+MAX_TEST_ORDER_NOTIONAL = float(os.getenv("MAX_TEST_ORDER_NOTIONAL", "100.0"))
+
+def us_stock(symbol: str, theme: str) -> dict:
+    return {
+        "symbol": symbol,
+        "market": "US",
+        "broker_symbol": symbol,
+        "theme": theme,
+    }
 
 WATCHLIST = [
-    {"symbol": "AAPL", "market": "US", "broker_symbol": "AAPL"},
-    {"symbol": "NVDA", "market": "US", "broker_symbol": "NVDA"},
-    {"symbol": "AMD", "market": "US", "broker_symbol": "AMD"},
-    {"symbol": "TSLA", "market": "US", "broker_symbol": "TSLA"},
-    {"symbol": "PLTR", "market": "US", "broker_symbol": "PLTR"},
-    {"symbol": "ARM", "market": "US", "broker_symbol": "ARM"},
-    {"symbol": "OUST", "market": "US", "broker_symbol": "OUST"},
-    {"symbol": "7203.T", "market": "JP", "broker_symbol": None},
-    {"symbol": "9984.T", "market": "JP", "broker_symbol": None},
-    {"symbol": "9988.HK", "market": "HK", "broker_symbol": None},
-    {"symbol": "0700.HK", "market": "HK", "broker_symbol": None},
-    {"symbol": "ASML.AS", "market": "EU", "broker_symbol": None},
-    {"symbol": "SAP.DE", "market": "EU", "broker_symbol": None},
-    {"symbol": "AZN.L", "market": "UK", "broker_symbol": None},
+    # AI mega-cap platforms
+    us_stock("NVDA", "AI chips/platform"),
+    us_stock("MSFT", "AI cloud/software"),
+    us_stock("GOOGL", "AI cloud/search"),
+    us_stock("GOOG", "AI cloud/search"),
+    us_stock("AMZN", "AI cloud/ecommerce"),
+    us_stock("META", "AI apps/infrastructure"),
+    us_stock("AAPL", "AI devices"),
+    us_stock("AVGO", "AI networking/custom chips"),
+    us_stock("ORCL", "AI cloud/database"),
+    us_stock("TSLA", "AI autonomy/robotics"),
+
+    # Semiconductors, memory, and chip infrastructure
+    us_stock("AMD", "AI accelerators"),
+    us_stock("INTC", "AI chips/foundry"),
+    us_stock("QCOM", "edge AI chips"),
+    us_stock("MRVL", "AI networking chips"),
+    us_stock("MU", "AI memory"),
+    us_stock("ARM", "chip IP"),
+    us_stock("TXN", "embedded AI hardware"),
+    us_stock("ADI", "edge/industrial AI chips"),
+    us_stock("ON", "sensors/auto AI chips"),
+    us_stock("MCHP", "embedded AI chips"),
+    us_stock("MPWR", "AI power chips"),
+    us_stock("LSCC", "FPGA/edge AI"),
+    us_stock("ALAB", "AI data-center connectivity"),
+    us_stock("COHR", "AI data-center optics"),
+    us_stock("LITE", "AI data-center optics"),
+    us_stock("AEHR", "chip testing"),
+    us_stock("AMBA", "edge AI vision chips"),
+
+    # AI servers, data centers, networking, and power
+    us_stock("SMCI", "AI servers"),
+    us_stock("DELL", "AI servers"),
+    us_stock("HPE", "AI servers/networking"),
+    us_stock("ANET", "AI data-center networking"),
+    us_stock("CSCO", "AI networking"),
+    us_stock("VRT", "AI data-center power/cooling"),
+    us_stock("ETN", "AI data-center power"),
+    us_stock("PWR", "AI data-center infrastructure"),
+    us_stock("FIX", "AI data-center services"),
+    us_stock("EQIX", "AI data centers"),
+    us_stock("DLR", "AI data centers"),
+
+    # Enterprise AI software and data platforms
+    us_stock("PLTR", "enterprise AI"),
+    us_stock("CRM", "enterprise AI software"),
+    us_stock("NOW", "workflow AI"),
+    us_stock("ADBE", "creative AI"),
+    us_stock("SNOW", "AI data cloud"),
+    us_stock("MDB", "AI database"),
+    us_stock("DDOG", "AI observability"),
+    us_stock("NET", "AI edge/cloud"),
+    us_stock("APP", "AI advertising"),
+    us_stock("TEAM", "collaboration AI"),
+    us_stock("WDAY", "enterprise AI"),
+    us_stock("INTU", "finance AI"),
+    us_stock("SHOP", "commerce AI"),
+    us_stock("UBER", "AI marketplace/autonomy"),
+    us_stock("RBLX", "AI content/platform"),
+    us_stock("DUOL", "education AI"),
+
+    # Cybersecurity AI
+    us_stock("CRWD", "AI cybersecurity"),
+    us_stock("PANW", "AI cybersecurity"),
+    us_stock("ZS", "AI cybersecurity"),
+    us_stock("S", "AI cybersecurity"),
+    us_stock("OKTA", "identity AI"),
+    us_stock("TENB", "AI cybersecurity"),
+
+    # Automation, robotics, autonomy, and sensing
+    us_stock("ISRG", "robotics"),
+    us_stock("TER", "robotics/testing"),
+    us_stock("ROK", "industrial AI"),
+    us_stock("SYM", "warehouse robotics"),
+    us_stock("MBLY", "autonomous driving"),
+    us_stock("OUST", "lidar/autonomy"),
+    us_stock("LAZR", "lidar/autonomy"),
+    us_stock("SERV", "robotics"),
+
+    # Pure-play and smaller AI-related names
+    us_stock("AI", "pure-play enterprise AI"),
+    us_stock("SOUN", "voice AI"),
+    us_stock("BBAI", "decision intelligence"),
+    us_stock("PATH", "automation AI"),
+    us_stock("RXRX", "AI drug discovery"),
+    us_stock("EXAI", "AI drug discovery"),
+    us_stock("UPST", "AI lending"),
+    us_stock("IONQ", "quantum/AI compute"),
+    us_stock("RGTI", "quantum/AI compute"),
+    us_stock("QBTS", "quantum/AI compute"),
 ]
 
 RISK_PER_TRADE = 0.01
@@ -56,6 +173,7 @@ DATA_PERIOD          = "1y"
 DATA_INTERVAL        = "1d"
 BASE_LOOKBACK        = 60
 BASE_EXCLUDE_BARS    = 3
+MIN_DAILY_BARS       = BASE_LOOKBACK + BASE_EXCLUDE_BARS + 20
 BREAKOUT_BUFFER      = 0.005
 VOLUME_CONFIRM_MULT  = 1.2
 RSI_BUY_MIN          = 55
@@ -76,6 +194,10 @@ MARKET_PROFILES = {
 # LINE MESSAGING API
 # =========================
 def send_line(message: str):
+    if not LINE_CHANNEL_TOKEN or not LINE_USER_ID:
+        print("LINE skipped: LINE_CHANNEL_TOKEN or LINE_USER_ID is not set")
+        return
+
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
@@ -281,7 +403,7 @@ def submit_market_order(symbol_info: dict, side: OrderSide, qty: int | None = No
     else:
         order_kwargs["qty"] = qty
 
-    client.submit_order(MarketOrderRequest(**order_kwargs))
+    get_trading_client().submit_order(MarketOrderRequest(**order_kwargs))
     return True
 
 # =========================
@@ -292,9 +414,10 @@ def run_scan_cycle():
     print(f"\n===== Scan cycle started: {cycle_time} =====")
 
     if ENABLE_ORDER_EXECUTION:
-        account = client.get_account()
+        trading_client = get_trading_client()
+        account = trading_client.get_account()
         equity = float(account.equity)
-        positions = {p.symbol: p for p in client.get_all_positions()}
+        positions = {p.symbol: p for p in trading_client.get_all_positions()}
         print(f"Account Equity: ${equity:,.2f}")
         print(
             f"Order execution enabled | Alpaca paper trading: {ALPACA_PAPER_TRADING} | "
@@ -309,12 +432,13 @@ def run_scan_cycle():
         SYMBOL = symbol_info["symbol"]
         MARKET = symbol_info["market"]
         BROKER_SYMBOL = symbol_info.get("broker_symbol")
+        THEME = symbol_info.get("theme", "general")
         market_open = is_market_open(MARKET)
 
         try:
             df = flatten(yf.download(SYMBOL, period=DATA_PERIOD, interval=DATA_INTERVAL, progress=False))
 
-            if df.empty or len(df) < 220:
+            if df.empty or len(df) < MIN_DAILY_BARS:
                 print(f"[{SYMBOL}] Not enough daily data, skipping")
                 continue
 
@@ -333,7 +457,7 @@ def run_scan_cycle():
             avg_vol = analysis["avg_vol"]
 
             print(
-                f"[{SYMBOL}/{MARKET}] {analysis['setup']} | MarketOpen:{market_open} | "
+                f"[{SYMBOL}/{MARKET}] {THEME} | {analysis['setup']} | MarketOpen:{market_open} | "
                 f"LocalTime:{market_time_label(MARKET)} | Price:{current_price:.2f} | "
                 f"Res:{analysis['resistance']:.2f} | Sup:{analysis['support']:.2f} | "
                 f"EMA12/26/50/200:{last['EMA12']:.2f}/{last['EMA26']:.2f}/{last['EMA50']:.2f}/{last['EMA200']:.2f} | "
@@ -390,7 +514,7 @@ def run_scan_cycle():
                 order_sent = submit_market_order(symbol_info, OrderSide.BUY, notional=order_notional)
                 msg = (
                     f"[{SYMBOL}] BUY\n"
-                    f"Market: {MARKET} | LocalTime: {market_time_label(MARKET)}\n"
+                    f"Market: {MARKET} | Theme: {THEME} | LocalTime: {market_time_label(MARKET)}\n"
                     f"Order : {'SENT' if order_sent else 'SCAN ONLY'}\n"
                     f"Setup : {analysis['setup']}\n"
                     f"Price : {current_price:.2f} | RiskQty: {risk_qty} | OrderNotional: ${order_notional:.2f}\n"
