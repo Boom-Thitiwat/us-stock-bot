@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import requests
+import time
 from datetime import datetime
 import pytz
 
@@ -17,15 +18,59 @@ ALPACA_SECRET_KEY = "5sb6HPNAbxyNQZESDckfs56ByW7fUXp3fAorga8jiRaL"
 LINE_CHANNEL_TOKEN = "FXjn2paEtU7hCyOAqeZEM/xImy8DZyADUfxiBNN0Gin+AtzmitBbXCq15ebhw2sY55SeId4TYEir6dSSolFGEpLFenklgDQbFvHZZaiP7CNayZaIOLmz8CJzWXw5tVTOZOBg2XjYHeQ8I1X0kWnJwAdB04t89/1O/w1cDnyilFU="
 LINE_USER_ID       = "U055a806a92f65f59a244daec80c171c6"
 
-client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+ALPACA_PAPER_TRADING = True
+client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER_TRADING)
 
 # =========================
 # SETTINGS
 # =========================
-SYMBOLS        = ["AAPL", "NVDA", "AMD", "TSLA", "PLTR"]
-RISK_PER_TRADE = 0.01   # เสี่ยง 1% ของ portfolio ต่อ 1 trade
-ATR_STOP_MULT  = 1.5    # Stop Loss = 1.5x ATR จาก entry
-TAKE_PROFIT_RR = 2.0    # Take Profit = 2x risk (R:R = 1:2)
+ENABLE_ORDER_EXECUTION = True
+RUN_CONTINUOUSLY = True
+SCAN_INTERVAL_SECONDS = 900
+MAX_TEST_ORDER_NOTIONAL = 100.0
+
+WATCHLIST = [
+    {"symbol": "AAPL", "market": "US", "broker_symbol": "AAPL"},
+    {"symbol": "NVDA", "market": "US", "broker_symbol": "NVDA"},
+    {"symbol": "AMD", "market": "US", "broker_symbol": "AMD"},
+    {"symbol": "TSLA", "market": "US", "broker_symbol": "TSLA"},
+    {"symbol": "PLTR", "market": "US", "broker_symbol": "PLTR"},
+    {"symbol": "ARM", "market": "US", "broker_symbol": "ARM"},
+    {"symbol": "OUST", "market": "US", "broker_symbol": "OUST"},
+    {"symbol": "7203.T", "market": "JP", "broker_symbol": None},
+    {"symbol": "9984.T", "market": "JP", "broker_symbol": None},
+    {"symbol": "9988.HK", "market": "HK", "broker_symbol": None},
+    {"symbol": "0700.HK", "market": "HK", "broker_symbol": None},
+    {"symbol": "ASML.AS", "market": "EU", "broker_symbol": None},
+    {"symbol": "SAP.DE", "market": "EU", "broker_symbol": None},
+    {"symbol": "AZN.L", "market": "UK", "broker_symbol": None},
+]
+
+RISK_PER_TRADE = 0.01
+ATR_STOP_MULT  = 1.5
+TAKE_PROFIT_RR = 2.0
+
+# Daily breakout setup, similar to the chart examples:
+# EMA 12/26/50/200 + resistance breakout + volume + RSI + MACD.
+DATA_PERIOD          = "1y"
+DATA_INTERVAL        = "1d"
+BASE_LOOKBACK        = 60
+BASE_EXCLUDE_BARS    = 3
+BREAKOUT_BUFFER      = 0.005
+VOLUME_CONFIRM_MULT  = 1.2
+RSI_BUY_MIN          = 55
+RSI_BUY_MAX          = 78
+RSI_EXIT_LEVEL       = 48
+
+MARKET_PROFILES = {
+    "US": {"timezone": "America/New_York", "trade_start": (10, 0), "trade_end": (15, 30), "weekend": {5, 6}},
+    "JP": {"timezone": "Asia/Tokyo", "trade_start": (9, 0), "trade_end": (15, 30), "weekend": {5, 6}},
+    "HK": {"timezone": "Asia/Hong_Kong", "trade_start": (9, 30), "trade_end": (16, 0), "weekend": {5, 6}},
+    "EU": {"timezone": "Europe/Amsterdam", "trade_start": (9, 0), "trade_end": (17, 30), "weekend": {5, 6}},
+    "UK": {"timezone": "Europe/London", "trade_start": (8, 0), "trade_end": (16, 30), "weekend": {5, 6}},
+    "TH": {"timezone": "Asia/Bangkok", "trade_start": (10, 0), "trade_end": (16, 30), "weekend": {5, 6}},
+    "CRYPTO": {"timezone": "UTC", "trade_start": (0, 0), "trade_end": (23, 59), "weekend": set()},
+}
 
 # =========================
 # LINE MESSAGING API
@@ -34,216 +79,366 @@ def send_line(message: str):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}"
+        "Authorization": f"Bearer {LINE_CHANNEL_TOKEN}",
     }
     payload = {
         "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}]
+        "messages": [{"type": "text", "text": message}],
     }
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code != 200:
-        print(f"LINE Error: {resp.status_code} — {resp.text}")
+        print(f"LINE Error: {resp.status_code} - {resp.text}")
 
 # =========================
 # INDICATORS
 # =========================
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta    = series.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    hl  = df["High"] - df["Low"]
-    hc  = (df["High"] - df["Close"].shift()).abs()
-    lc  = (df["Low"]  - df["Close"].shift()).abs()
-    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    hl = df["High"] - df["Low"]
+    hc = (df["High"] - df["Close"].shift()).abs()
+    lc = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     return tr.ewm(span=period, adjust=False).mean()
+
+def calc_macd(series: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema12 = series.ewm(span=12, adjust=False).mean()
+    ema26 = series.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    return macd, signal, hist
 
 def flatten(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
 
+def add_chart_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for period in (12, 26, 50, 200):
+        df[f"EMA{period}"] = df["Close"].ewm(span=period, adjust=False).mean()
+
+    df["RSI"] = calc_rsi(df["Close"])
+    df["RSI_MA"] = df["RSI"].rolling(14).mean()
+    df["MACD"], df["MACD_SIGNAL"], df["MACD_HIST"] = calc_macd(df["Close"])
+    df["ATR"] = calc_atr(df)
+    df["VolAvg20"] = df["Volume"].rolling(20).mean()
+
+    df["Resistance"] = df["High"].shift(BASE_EXCLUDE_BARS).rolling(BASE_LOOKBACK).max()
+    df["Support"] = df["Low"].shift(BASE_EXCLUDE_BARS).rolling(BASE_LOOKBACK).min()
+    return df
+
+def analyze_chart_setup(df: pd.DataFrame) -> dict:
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    price = float(last["Close"])
+    resistance = float(last["Resistance"])
+    support = float(last["Support"])
+    atr = float(last["ATR"])
+    avg_vol = float(last["VolAvg20"])
+
+    ema12 = float(last["EMA12"])
+    ema26 = float(last["EMA26"])
+    ema50 = float(last["EMA50"])
+    ema200 = float(last["EMA200"])
+
+    ema_bull = price > ema12 > ema26 > ema50 > ema200
+    above_long_trend = price > ema50 and ema50 > ema200
+    just_broke_out = (
+        pd.notna(resistance)
+        and price > resistance * (1 + BREAKOUT_BUFFER)
+        and float(prev["Close"]) <= resistance * (1 + BREAKOUT_BUFFER)
+    )
+    breakout_continuation = (
+        pd.notna(resistance)
+        and price > resistance * (1 + BREAKOUT_BUFFER)
+        and price > ema12
+        and float(last["Low"]) >= ema26 * 0.98
+    )
+    pullback_bounce = (
+        price > ema12
+        and float(last["Low"]) <= ema26 * 1.02
+        and float(prev["Close"]) > float(prev["EMA50"])
+    )
+    near_resistance = pd.notna(resistance) and price >= resistance * 0.97
+
+    vol_confirm = pd.notna(avg_vol) and float(last["Volume"]) > avg_vol * VOLUME_CONFIRM_MULT
+    rsi_buy_zone = RSI_BUY_MIN <= float(last["RSI"]) <= RSI_BUY_MAX
+    rsi_strength = float(last["RSI"]) > float(last["RSI_MA"]) or float(last["RSI"]) >= 60
+    macd_confirm = float(last["MACD"]) > float(last["MACD_SIGNAL"]) and float(last["MACD_HIST"]) > 0
+
+    buy_signal = (
+        (just_broke_out or breakout_continuation or pullback_bounce)
+        and (ema_bull or above_long_trend)
+        and vol_confirm
+        and rsi_buy_zone
+        and rsi_strength
+        and macd_confirm
+    )
+    sell_signal = (
+        price < ema26
+        or float(last["RSI"]) < RSI_EXIT_LEVEL
+        or float(last["MACD"]) < float(last["MACD_SIGNAL"])
+        or (pd.notna(support) and price < support)
+    )
+
+    if just_broke_out:
+        setup = "Fresh resistance breakout"
+    elif breakout_continuation:
+        setup = "Breakout continuation"
+    elif pullback_bounce:
+        setup = "EMA pullback bounce"
+    elif near_resistance and above_long_trend:
+        setup = "Watch near resistance"
+    else:
+        setup = "No setup"
+
+    stop_from_support = support * 0.99 if pd.notna(support) else price - atr * ATR_STOP_MULT
+    stop_from_atr = price - atr * ATR_STOP_MULT
+    stop_price = max(stop_from_support, stop_from_atr)
+    if stop_price >= price:
+        stop_price = stop_from_atr
+
+    return {
+        "last": last,
+        "price": price,
+        "resistance": resistance,
+        "support": support,
+        "atr": atr,
+        "avg_vol": avg_vol,
+        "setup": setup,
+        "buy_signal": buy_signal,
+        "sell_signal": sell_signal,
+        "ema_bull": ema_bull,
+        "above_long_trend": above_long_trend,
+        "just_broke_out": just_broke_out,
+        "breakout_continuation": breakout_continuation,
+        "pullback_bounce": pullback_bounce,
+        "vol_confirm": vol_confirm,
+        "rsi_buy_zone": rsi_buy_zone,
+        "rsi_strength": rsi_strength,
+        "macd_confirm": macd_confirm,
+        "stop_price": stop_price,
+    }
+
 # =========================
 # MARKET HOURS CHECK
 # =========================
-def is_market_open() -> bool:
-    now = datetime.now(pytz.timezone("America/New_York"))
-    if now.weekday() >= 5:
+def is_market_open(market: str) -> bool:
+    profile = MARKET_PROFILES.get(market, MARKET_PROFILES["US"])
+    now = datetime.now(pytz.timezone(profile["timezone"]))
+    if now.weekday() in profile["weekend"]:
         return False
-    # หลีกเลี่ยง 30 นาทีแรกและ 30 นาทีสุดท้ายของตลาด (volatile/spread กว้าง)
-    trade_start = now.replace(hour=10, minute=0,  second=0, microsecond=0)
-    trade_end   = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    start_hour, start_minute = profile["trade_start"]
+    end_hour, end_minute = profile["trade_end"]
+    trade_start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    trade_end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
     return trade_start <= now <= trade_end
+
+def market_time_label(market: str) -> str:
+    profile = MARKET_PROFILES.get(market, MARKET_PROFILES["US"])
+    now = datetime.now(pytz.timezone(profile["timezone"]))
+    return now.strftime("%Y-%m-%d %H:%M %Z")
 
 # =========================
 # POSITION SIZING
-# Risk-based: คำนวณ qty จาก % equity ที่ยอมเสีย
 # =========================
 def calc_qty(equity: float, entry: float, stop: float) -> int:
-    risk_amount    = equity * RISK_PER_TRADE
+    risk_amount = equity * RISK_PER_TRADE
     risk_per_share = entry - stop
     if risk_per_share <= 0:
         return 1
     return max(int(risk_amount / risk_per_share), 1)
 
+def can_submit_order(symbol_info: dict) -> bool:
+    return (
+        ENABLE_ORDER_EXECUTION
+        and symbol_info.get("broker_symbol") is not None
+        and is_market_open(symbol_info["market"])
+    )
+
+def submit_market_order(symbol_info: dict, side: OrderSide, qty: int | None = None, notional: float | None = None) -> bool:
+    if not can_submit_order(symbol_info):
+        return False
+
+    order_kwargs = {
+        "symbol": symbol_info["broker_symbol"],
+        "side": side,
+        "time_in_force": TimeInForce.DAY,
+    }
+    if notional is not None:
+        order_kwargs["notional"] = round(notional, 2)
+    else:
+        order_kwargs["qty"] = qty
+
+    client.submit_order(MarketOrderRequest(**order_kwargs))
+    return True
+
 # =========================
 # MAIN BOT
 # =========================
-if not is_market_open():
-    msg = "Market closed or outside trading window (10:00–15:30 ET)"
-    print(msg)
-    send_line(msg)
-    exit()
+def run_scan_cycle():
+    cycle_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n===== Scan cycle started: {cycle_time} =====")
 
-account = client.get_account()
-equity  = float(account.equity)
-print(f"Account Equity: ${equity:,.2f}")
-
-for SYMBOL in SYMBOLS:
-    try:
-        # ---- GET DATA ----
-        # 15m: signal timeframe | 1h: trend filter timeframe
-        df15 = flatten(yf.download(SYMBOL, period="5d",  interval="15m", progress=False))
-        df1h = flatten(yf.download(SYMBOL, period="30d", interval="1h",  progress=False))
-
-        if df15.empty or df1h.empty:
-            print(f"[{SYMBOL}] No data, skipping")
-            continue
-
-        # ---- INDICATORS (15m) ----
-        df15["EMA9"]   = df15["Close"].ewm(span=9).mean()
-        df15["EMA21"]  = df15["Close"].ewm(span=21).mean()
-        df15["RSI"]    = calc_rsi(df15["Close"])
-        df15["ATR"]    = calc_atr(df15)
-        df15["VolAvg"] = df15["Volume"].rolling(20).mean()
-
-        # ---- TREND FILTER (1h) ----
-        # ซื้อเฉพาะตอน uptrend: ราคา > EMA50 บน 1h
-        df1h["EMA50"] = df1h["Close"].ewm(span=50).mean()
-
-        last = df15.iloc[-1]
-        prev = df15.iloc[-2]
-
-        current_price  = float(last["Close"])
-        last_ema9      = float(last["EMA9"])
-        last_ema21     = float(last["EMA21"])
-        prev_ema9      = float(prev["EMA9"])
-        prev_ema21     = float(prev["EMA21"])
-        last_rsi       = float(last["RSI"])
-        last_atr       = float(last["ATR"])
-        last_vol       = float(last["Volume"])
-        avg_vol        = float(last["VolAvg"])
-        trend_close    = float(df1h["Close"].iloc[-1])
-        trend_ema50    = float(df1h["EMA50"].iloc[-1])
-
-        # ---- SIGNAL: ต้องเป็น crossover จริง ไม่ใช่แค่ EMA9 > EMA21 ----
-        cross_up   = (prev_ema9 <= prev_ema21) and (last_ema9 > last_ema21)
-        cross_down = (prev_ema9 >= prev_ema21) and (last_ema9 < last_ema21)
-
-        # ---- FILTERS ----
-        uptrend     = trend_close > trend_ema50          # 1h trend เป็น up
-        vol_confirm = last_vol > (avg_vol * 1.2)         # volume สูงกว่าเฉลี่ย 20%
-        rsi_ok_buy  = 45 < last_rsi < 70                 # ไม่ overbought
-        rsi_ok_sell = last_rsi > 50
-
+    if ENABLE_ORDER_EXECUTION:
+        account = client.get_account()
+        equity = float(account.equity)
+        positions = {p.symbol: p for p in client.get_all_positions()}
+        print(f"Account Equity: ${equity:,.2f}")
         print(
-            f"[{SYMBOL}] Price:{current_price:.2f} | EMA9:{last_ema9:.2f} | EMA21:{last_ema21:.2f} | "
-            f"RSI:{last_rsi:.1f} | ATR:{last_atr:.2f} | Uptrend:{uptrend} | VolOK:{vol_confirm}"
+            f"Order execution enabled | Alpaca paper trading: {ALPACA_PAPER_TRADING} | "
+            f"Max test buy notional: ${MAX_TEST_ORDER_NOTIONAL:.2f}"
         )
+    else:
+        equity = 10000.0
+        positions = {}
+        print("Global scan/test mode: order execution is disabled")
 
-        # ---- CHECK OPEN POSITION ----
-        positions = client.get_all_positions()
-        holding   = False
-        position  = None
-        for p in positions:
-            if p.symbol == SYMBOL:
-                holding  = True
-                position = p
-                break
+    for symbol_info in WATCHLIST:
+        SYMBOL = symbol_info["symbol"]
+        MARKET = symbol_info["market"]
+        BROKER_SYMBOL = symbol_info.get("broker_symbol")
+        market_open = is_market_open(MARKET)
 
-        # ---- STOP LOSS & TAKE PROFIT ----
-        if holding:
-            entry_price = float(position.avg_entry_price)
-            stop_price  = entry_price - (last_atr * ATR_STOP_MULT)
-            tp_price    = entry_price + (entry_price - stop_price) * TAKE_PROFIT_RR
-            qty_held    = int(float(position.qty))
+        try:
+            df = flatten(yf.download(SYMBOL, period=DATA_PERIOD, interval=DATA_INTERVAL, progress=False))
 
-            if current_price <= stop_price:
-                client.submit_order(MarketOrderRequest(
-                    symbol=SYMBOL, qty=qty_held,
-                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY
-                ))
-                pnl = ((current_price / entry_price) - 1) * 100
+            if df.empty or len(df) < 220:
+                print(f"[{SYMBOL}] Not enough daily data, skipping")
+                continue
+
+            df = add_chart_indicators(df).dropna()
+            if len(df) < 2:
+                print(f"[{SYMBOL}] Not enough indicator data, skipping")
+                continue
+
+            analysis = analyze_chart_setup(df)
+            last = analysis["last"]
+
+            current_price = analysis["price"]
+            last_rsi = float(last["RSI"])
+            last_atr = analysis["atr"]
+            last_vol = float(last["Volume"])
+            avg_vol = analysis["avg_vol"]
+
+            print(
+                f"[{SYMBOL}/{MARKET}] {analysis['setup']} | MarketOpen:{market_open} | "
+                f"LocalTime:{market_time_label(MARKET)} | Price:{current_price:.2f} | "
+                f"Res:{analysis['resistance']:.2f} | Sup:{analysis['support']:.2f} | "
+                f"EMA12/26/50/200:{last['EMA12']:.2f}/{last['EMA26']:.2f}/{last['EMA50']:.2f}/{last['EMA200']:.2f} | "
+                f"RSI:{last_rsi:.1f} | MACD:{last['MACD']:.2f}/{last['MACD_SIGNAL']:.2f} | "
+                f"Vol:{last_vol:,.0f}/{avg_vol:,.0f} | VolOK:{analysis['vol_confirm']}"
+            )
+
+            position = positions.get(BROKER_SYMBOL) if BROKER_SYMBOL else None
+            holding = position is not None
+
+            if holding:
+                entry_price = float(position.avg_entry_price)
+                trailing_stop = max(entry_price - (last_atr * ATR_STOP_MULT), analysis["stop_price"])
+                risk_per_share = last_atr * ATR_STOP_MULT
+                tp_price = entry_price + risk_per_share * TAKE_PROFIT_RR
+                qty_held = int(float(position.qty))
+
+                if current_price <= trailing_stop:
+                    order_sent = submit_market_order(symbol_info, OrderSide.SELL, qty=qty_held)
+                    pnl = ((current_price / entry_price) - 1) * 100
+                    msg = (
+                        f"[{SYMBOL}] STOP LOSS\n"
+                        f"Order : {'SENT' if order_sent else 'SCAN ONLY'}\n"
+                        f"Entry : {entry_price:.2f}\n"
+                        f"Stop  : {trailing_stop:.2f}\n"
+                        f"Price : {current_price:.2f}\n"
+                        f"P&L   : {pnl:.2f}%"
+                    )
+                    print(msg)
+                    send_line(msg)
+                    continue
+
+                if current_price >= tp_price:
+                    order_sent = submit_market_order(symbol_info, OrderSide.SELL, qty=qty_held)
+                    pnl = ((current_price / entry_price) - 1) * 100
+                    msg = (
+                        f"[{SYMBOL}] TAKE PROFIT\n"
+                        f"Order : {'SENT' if order_sent else 'SCAN ONLY'}\n"
+                        f"Entry : {entry_price:.2f}\n"
+                        f"TP    : {tp_price:.2f}\n"
+                        f"Price : {current_price:.2f}\n"
+                        f"P&L   : +{pnl:.2f}%"
+                    )
+                    print(msg)
+                    send_line(msg)
+                    continue
+
+            if analysis["buy_signal"] and not holding:
+                stop_price = analysis["stop_price"]
+                tp_price = current_price + (current_price - stop_price) * TAKE_PROFIT_RR
+                risk_qty = calc_qty(equity, current_price, stop_price)
+                order_notional = min(risk_qty * current_price, MAX_TEST_ORDER_NOTIONAL)
+
+                order_sent = submit_market_order(symbol_info, OrderSide.BUY, notional=order_notional)
                 msg = (
-                    f"🔴 [{SYMBOL}] STOP LOSS\n"
-                    f"Entry : {entry_price:.2f}\n"
+                    f"[{SYMBOL}] BUY\n"
+                    f"Market: {MARKET} | LocalTime: {market_time_label(MARKET)}\n"
+                    f"Order : {'SENT' if order_sent else 'SCAN ONLY'}\n"
+                    f"Setup : {analysis['setup']}\n"
+                    f"Price : {current_price:.2f} | RiskQty: {risk_qty} | OrderNotional: ${order_notional:.2f}\n"
+                    f"Res   : {analysis['resistance']:.2f} | Sup: {analysis['support']:.2f}\n"
                     f"Stop  : {stop_price:.2f}\n"
-                    f"Price : {current_price:.2f}\n"
-                    f"P&L   : {pnl:.2f}%"
+                    f"TP    : {tp_price:.2f} (R:R 1:{TAKE_PROFIT_RR})\n"
+                    f"RSI   : {last_rsi:.1f} | MACD: {last['MACD']:.2f}/{last['MACD_SIGNAL']:.2f}\n"
+                    f"Vol   : {last_vol:,.0f} / Avg20 {avg_vol:,.0f}"
                 )
-                print(msg); send_line(msg)
-                continue
+                print(msg)
+                send_line(msg)
 
-            if current_price >= tp_price:
-                client.submit_order(MarketOrderRequest(
-                    symbol=SYMBOL, qty=qty_held,
-                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY
-                ))
-                pnl = ((current_price / entry_price) - 1) * 100
+            elif analysis["sell_signal"] and holding:
+                order_sent = submit_market_order(symbol_info, OrderSide.SELL, qty=int(float(position.qty)))
                 msg = (
-                    f"✅ [{SYMBOL}] TAKE PROFIT\n"
-                    f"Entry : {entry_price:.2f}\n"
-                    f"TP    : {tp_price:.2f}\n"
-                    f"Price : {current_price:.2f}\n"
-                    f"P&L   : +{pnl:.2f}%"
+                    f"[{SYMBOL}] SELL SIGNAL\n"
+                    f"Market : {MARKET} | Order: {'SENT' if order_sent else 'SCAN ONLY'}\n"
+                    f"Price  : {current_price:.2f}\n"
+                    f"Reason : Momentum/EMA support failed\n"
+                    f"EMA26  : {last['EMA26']:.2f} | RSI: {last_rsi:.1f} | "
+                    f"MACD: {last['MACD']:.2f}/{last['MACD_SIGNAL']:.2f}"
                 )
-                print(msg); send_line(msg)
-                continue
+                print(msg)
+                send_line(msg)
 
-        # ---- BUY SIGNAL ----
-        # เงื่อนไข: EMA crossover ขึ้น + uptrend (1h) + volume พุ่ง + RSI ไม่ overbought
-        if cross_up and uptrend and vol_confirm and rsi_ok_buy and not holding:
-            stop_price = current_price - (last_atr * ATR_STOP_MULT)
-            tp_price   = current_price + (current_price - stop_price) * TAKE_PROFIT_RR
-            qty        = calc_qty(equity, current_price, stop_price)
+            else:
+                print(f"[{SYMBOL}] NO TRADE")
 
-            client.submit_order(MarketOrderRequest(
-                symbol=SYMBOL, qty=qty,
-                side=OrderSide.BUY, time_in_force=TimeInForce.DAY
-            ))
-            msg = (
-                f"🟢 [{SYMBOL}] BUY\n"
-                f"Price : {current_price:.2f} | Qty: {qty}\n"
-                f"Stop  : {stop_price:.2f} ({ATR_STOP_MULT}x ATR)\n"
-                f"TP    : {tp_price:.2f} (R:R 1:{TAKE_PROFIT_RR})\n"
-                f"RSI   : {last_rsi:.1f} | Uptrend: {uptrend}"
-            )
-            print(msg); send_line(msg)
+        except Exception as e:
+            error_msg = f"[{SYMBOL}] ERROR: {e}"
+            print(error_msg)
+            send_line(error_msg)
 
-        # ---- SELL SIGNAL ----
-        # EMA crossover ลง หรือ trend เปลี่ยนเป็น downtrend
-        elif (cross_down or not uptrend) and holding:
-            client.submit_order(MarketOrderRequest(
-                symbol=SYMBOL, qty=int(float(position.qty)),
-                side=OrderSide.SELL, time_in_force=TimeInForce.DAY
-            ))
-            reason = "EMA Cross Down" if cross_down else "Trend Break (price < EMA50)"
-            msg = (
-                f"🟡 [{SYMBOL}] SELL SIGNAL\n"
-                f"Price  : {current_price:.2f}\n"
-                f"Reason : {reason}"
-            )
-            print(msg); send_line(msg)
+    print("===== Scan cycle finished =====")
 
-        else:
-            print(f"[{SYMBOL}] NO SIGNAL")
+def main():
+    if not RUN_CONTINUOUSLY:
+        run_scan_cycle()
+        return
 
-    except Exception as e:
-        error_msg = f"[{SYMBOL}] ERROR: {e}"
-        print(error_msg)
-        send_line(error_msg)
+    print(f"Auto trading loop started. Scan interval: {SCAN_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.")
+    while True:
+        run_scan_cycle()
+        print(f"Sleeping {SCAN_INTERVAL_SECONDS} seconds before next scan...\n")
+        time.sleep(SCAN_INTERVAL_SECONDS)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Auto trading loop stopped by user.")

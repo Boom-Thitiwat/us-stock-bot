@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../e-memo demo"
+		}
+	],
+	"settings": {
+		"claudeCodeChat.permissions.yoloMode": false
+	}
+}
